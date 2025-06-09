@@ -1,47 +1,47 @@
 import traceback
 import os
-import json
-import torch
 from fastapi import FastAPI
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer, util
+import torch
+import json
 
 app = FastAPI()
 
-# Load JSON data
-with open("tds_discourse_posts_with_embeddings.json", "r", encoding="utf-8") as f:
+# Load your JSON data using absolute path
+file_path = os.path.join(os.path.dirname(__file__), "tds_discourse_posts_with_embeddings.json")
+with open(file_path, "r", encoding="utf-8") as f:
     posts = json.load(f)
 
-# Load sentence transformer model
+# Load the model once
 model = SentenceTransformer("all-MiniLM-L6-v2")
-model.to(torch.device("cpu"))
+model.to(torch.device("cpu"))  # Force CPU for Render
 
-# Input schema
 class QuestionRequest(BaseModel):
     question: str
 
 @app.post("/api/")
 async def get_answer(request: QuestionRequest):
+    question = request.question
     try:
-        question = request.question
+        # Encode question embedding
         question_embedding = model.encode(question, convert_to_tensor=True, device="cpu")
 
-        similarities = []
+        sims = []
         for post in posts:
             emb = post.get("embedding")
-            if emb:
-                emb_tensor = torch.tensor(emb, device="cpu")
-                sim = util.cos_sim(question_embedding, emb_tensor)[0][0].item()
-                similarities.append((sim, post))
+            if emb is None:
+                continue
+            emb_tensor = torch.tensor(emb, device="cpu")
+            sim = util.cos_sim(question_embedding, emb_tensor)[0][0].item()
+            sims.append((sim, post))
 
-        # Get top 3 similar posts
-        top_posts = sorted(similarities, key=lambda x: x[0], reverse=True)[:3]
+        top_posts = sorted(sims, key=lambda x: x[0], reverse=True)[:3]
 
-        # Answer: join their text
-        contents = [p.get("text", "") for _, p in top_posts if p.get("text")]
+        # Collect text and links from top posts
+        contents = [post.get("text", "") for _, post in top_posts if post.get("text")]
         answer = " ".join(contents) if contents else "Sorry, relevant content not found."
 
-        # Collect up to 3 links
         links = []
         for _, post in top_posts:
             links.extend(post.get("links", []))
@@ -51,11 +51,10 @@ async def get_answer(request: QuestionRequest):
         return {"answer": answer, "links": links[:3]}
 
     except Exception as e:
-        print("Exception:", e)
-        print(traceback.format_exc())
+        error_message = f"Exception: {str(e)}\nTraceback:\n{traceback.format_exc()}"
+        print(error_message)
         return {"answer": "Internal error occurred.", "links": [], "error": str(e)}
 
-# For local/dev testing (Render ignores this block)
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
