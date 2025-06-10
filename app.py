@@ -1,21 +1,21 @@
 import traceback
 import os
+import json
 from fastapi import FastAPI
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer, util
 import torch
-import json
 
 app = FastAPI()
 
-# Load your JSON data using absolute path
-file_path = os.path.join(os.path.dirname(__file__), "tds_discourse_posts_with_embeddings.json")
+# Load the compressed posts
+file_path = os.path.join(os.path.dirname(__file__), "tds_discourse_posts_compressed.json")
 with open(file_path, "r", encoding="utf-8") as f:
     posts = json.load(f)
 
-# Load the model once
+# Load model
 model = SentenceTransformer("all-MiniLM-L6-v2")
-model.to(torch.device("cpu"))  # Force CPU for Render
+model.to(torch.device("cpu"))
 
 class QuestionRequest(BaseModel):
     question: str
@@ -24,7 +24,6 @@ class QuestionRequest(BaseModel):
 async def get_answer(request: QuestionRequest):
     question = request.question
     try:
-        # Encode question embedding
         question_embedding = model.encode(question, convert_to_tensor=True, device="cpu")
 
         sims = []
@@ -32,13 +31,12 @@ async def get_answer(request: QuestionRequest):
             emb = post.get("embedding")
             if emb is None:
                 continue
-            emb_tensor = torch.tensor(emb, device="cpu")
+            emb_tensor = torch.tensor(emb, dtype=torch.float32, device="cpu")
             sim = util.cos_sim(question_embedding, emb_tensor)[0][0].item()
             sims.append((sim, post))
 
         top_posts = sorted(sims, key=lambda x: x[0], reverse=True)[:3]
 
-        # Collect text and links from top posts
         contents = [post.get("text", "") for _, post in top_posts if post.get("text")]
         answer = " ".join(contents) if contents else "Sorry, relevant content not found."
 
