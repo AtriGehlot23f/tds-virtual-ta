@@ -1,59 +1,83 @@
-import traceback
-import os
-import json
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer, util
+from typing import List, Optional
+import json
+import numpy as np
+import base64
 import torch
+from sentence_transformers import SentenceTransformer
+from PIL import Image
+from io import BytesIO
+import os
 
-app = FastAPI()
-
-# Load the compressed posts
-file_path = os.path.join(os.path.dirname(__file__), "tds_discourse_posts_compressed.json")
-with open(file_path, "r", encoding="utf-8") as f:
+# Load embeddings and posts from the smaller JSON file
+with open("tds_discourse_posts_small.json", "r") as f:
     posts = json.load(f)
 
-# Load model
-model = SentenceTransformer("all-MiniLM-L6-v2")
-model.to(torch.device("cpu"))
+post_embeddings = np.array([post["embedding"] for post in posts])
 
-class QuestionRequest(BaseModel):
-    question: str
+# Load the CLIP model
+model = SentenceTransformer("clip-ViT-B-32")
 
-@app.post("/api/")
-async def get_answer(request: QuestionRequest):
-    question = request.question
-    try:
-        question_embedding = model.encode(question, convert_to_tensor=True, device="cpu")
+# FastAPI app setup
+app = FastAPI()
 
-        sims = []
-        for post in posts:
-            emb = post.get("embedding")
-            if emb is None:
-                continue
-            emb_tensor = torch.tensor(emb, dtype=torch.float32, device="cpu")
-            sim = util.cos_sim(question_embedding, emb_tensor)[0][0].item()
-            sims.append((sim, post))
+# Enable CORS for local development or frontend testing
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-        top_posts = sorted(sims, key=lambda x: x[0], reverse=True)[:3]
+# Request and response models
+class QueryRequest(BaseModel):
+    query: Optional[str] = None
+    top_k: int = 5
 
-        contents = [post.get("text", "") for _, post in top_posts if post.get("text")]
-        answer = " ".join(contents) if contents else "Sorry, relevant content not found."
+@app.get("/")
+def read_root():
+    return {"message": "TDS Virtual TA is running!"}
 
-        links = []
-        for _, post in top_posts:
-            links.extend(post.get("links", []))
-        while len(links) < 3:
-            links.append("")
+@app.post("/search")
+async def search(request: QueryRequest):
+    if not request.query:
+        return {"error": "Query text is required"}
 
-        return {"answer": answer, "links": links[:3]}
+    query_embedding = model.encode(request.query, normalize_embeddings=True)
+    scores = np.dot(post_embeddings, query_embedding)
+    top_indices = np.argsort(scores)[::-1][:request.top_k]
 
-    except Exception as e:
-        error_message = f"Exception: {str(e)}\nTraceback:\n{traceback.format_exc()}"
-        print(error_message)
-        return {"answer": "Internal error occurred.", "links": [], "error": str(e)}
+    results = []
+    for i in top_indices:
+        post = posts[i]
+        results.append({
+            "title": post.get("title", ""),
+            "url": post.get("url", ""),
+            "score": float(scores[i]),
+            "excerpt": post.get("excerpt", "")[:300]  # Limit excerpt size
+        })
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    return {"results": results}
+
+@app.post("/search-image")
+async def search_image(file: UploadFile = File(...), top_k: int = 5):
+    image_bytes = await file.read()
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    image_embedding = model.encode(image, normalize_embeddings=True)
+    scores = np.dot(post_embeddings, image_embedding)
+    top_indices = np.argsort(scores)[::-1][:top_k]
+
+    results = []
+    for i in top_indices:
+        post = posts[i]
+        results.append({
+            "title": post.get("title", ""),
+            "url": post.get("url", ""),
+            "score": float(scores[i]),
+            "excerpt": post.get("excerpt", "")[:300]
+        })
+
+    return {"results": results}
