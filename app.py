@@ -1,25 +1,25 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional
 import json
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from typing import List
 
-
-with open("tds_discourse_posts_small.json", "r") as f:
+# Load full JSON data
+with open("tds_discourse_posts_with_embeddings.json", "r") as f:
     posts = json.load(f)
 
-
+# Load embedding model
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
-
+# Load all embeddings
 post_embeddings = np.array([post["embedding"] for post in posts])
 
-
+# Initialize FastAPI app
 app = FastAPI()
 
-
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,39 +28,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
+# Request model
 class QueryRequest(BaseModel):
-    question: str
+    query: Optional[str] = None
+    top_k: int = 5
 
-
-class QueryResponse(BaseModel):
-    answer: str
-    links: List[str]
-
-
+# Root health check
 @app.get("/")
 def read_root():
-    return {"message": "TDS Virtual TA is running!"}
+    return {"message": "TDS Virtual TA is running with full data!"}
 
+# Search endpoint
+@app.post("/search")
+async def search(request: QueryRequest):
+    if not request.query:
+        return {"error": "Query text is required"}
 
-@app.post("/api/", response_model=QueryResponse)
-async def get_answer(request: QueryRequest):
-    question = request.question
+    # Encode and search
+    query_embedding = model.encode(request.query, normalize_embeddings=True)
+    scores = np.dot(post_embeddings, query_embedding)
+    top_indices = np.argsort(scores)[::-1][:request.top_k]
 
-    
-    question_embedding = model.encode(question, normalize_embeddings=True)
+    results = []
+    for i in top_indices:
+        post = posts[i]
+        results.append({
+            "title": post.get("title", ""),
+            "url": post.get("url", ""),
+            "score": float(scores[i]),
+            "excerpt": post.get("excerpt", "")[:300]
+        })
 
-    
-    scores = np.dot(post_embeddings, question_embedding)
-    top_indices = np.argsort(scores)[::-1][:3]
-
-    
-    top_posts = [posts[i] for i in top_indices]
-    answer_parts = [p.get("excerpt", "") for p in top_posts]
-    answer = " ".join(answer_parts) if answer_parts else "Sorry, no relevant posts found."
-
-    links = [p.get("url", "") for p in top_posts]
-    while len(links) < 3:
-        links.append("")
-
-    return {"answer": answer, "links": links}
+    return {"results": results}
