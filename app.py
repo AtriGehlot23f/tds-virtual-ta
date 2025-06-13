@@ -30,13 +30,42 @@ app.add_middleware(
 
 
 class QueryRequest(BaseModel):
-    query: Optional[str] = None
+    question: Optional[str] = None
     top_k: int = 5
+
+    @property
+    def query(self):
+        return self.question
 
 
 @app.get("/")
-def read_root():
-    return {"message": "TDS Virtual TA is running!"}
+def root():
+    return {"message": "TDS Virtual TA is live!"}
+
+
+@app.post("/")
+async def ask_question(request: QueryRequest):
+    if not request.query:
+        return {"error": "Query text is required"}
+
+    query_embedding = model.encode(request.query, normalize_embeddings=True)
+    scores = np.dot(post_embeddings, query_embedding)
+    top_indices = np.argsort(scores)[::-1][:request.top_k]
+
+    results = [posts[i] for i in top_indices]
+    answer = " ".join(post.get("text", "") for post in results if post.get("text"))[:1000]
+
+    links = [
+        {"url": post.get("url", ""), "text": post.get("title", "")}
+        for post in results if post.get("url")
+    ]
+    while len(links) < 3:
+        links.append({"url": "", "text": ""})
+
+    return {
+        "answer": answer or "Sorry, no relevant content found.",
+        "links": links[:3]
+    }
 
 
 @app.post("/search")
@@ -44,25 +73,18 @@ async def search(request: QueryRequest):
     if not request.query:
         return {"error": "Query text is required"}
 
-    
     query_embedding = model.encode(request.query, normalize_embeddings=True)
     scores = np.dot(post_embeddings, query_embedding)
     top_indices = np.argsort(scores)[::-1][:request.top_k]
 
-    
-    results = []
-    for i in top_indices:
-        post = posts[i]
-        results.append({
-            "title": post.get("title", ""),
-            "url": post.get("url", ""),
-            "score": float(scores[i]),
-            "excerpt": post.get("excerpt", "")[:300]
-        })
-
-    return {"results": results}
-
-
-@app.post("/")
-async def root_post(request: QueryRequest):
-    return await search(request)
+    return {
+        "results": [
+            {
+                "title": posts[i].get("title", ""),
+                "url": posts[i].get("url", ""),
+                "score": float(scores[i]),
+                "excerpt": posts[i].get("text", "")[:300]
+            }
+            for i in top_indices
+        ]
+    }
